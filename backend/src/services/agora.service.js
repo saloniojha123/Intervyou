@@ -1,211 +1,245 @@
-import agoraToken from "agora-token";
-const { RtcTokenBuilder, RtcRole } = agoraToken;
 
-import { config } from "../config/index.js";
-import { logger } from "../utils/logger.js";
 
-const TOKEN_TTL_SECONDS = 3600;
+import axios from "axios";
+import pkg from "agora-token";
 
-class AgoraService {
-  isConfigured() {
-    return Boolean(
-      config.agora.appId &&
-      config.agora.appCertificate &&
-      config.agora.customerId &&
-      config.agora.customerSecret &&
-      config.agora.pipelineId
-    );
+const { RtcTokenBuilder, RtcRole, RtmTokenBuilder } = pkg;
+
+const APP_ID = process.env.AGORA_APP_ID;
+const APP_CERTIFICATE = process.env.AGORA_APP_CERTIFICATE;
+const CUSTOMER_ID = process.env.AGORA_CUSTOMER_ID;
+const CUSTOMER_SECRET = process.env.AGORA_CUSTOMER_SECRET;
+const AGENT_UID = 9999;
+const TOKEN_TTL = 3600;
+const API_BASE = "https://api.agora.io/api/conversational-ai-agent/v2";
+
+function required(name, value) {
+  if (!value) throw new Error(`${name} is missing from backend environment`);
+  return value;
+}
+
+function headers() {
+  const id = required("AGORA_CUSTOMER_ID", CUSTOMER_ID);
+  const secret = required("AGORA_CUSTOMER_SECRET", CUSTOMER_SECRET);
+  const basic = Buffer.from(`${id}:${secret}`, "utf8").toString("base64");
+  return {
+    Authorization: `Basic ${basic}`,
+    "Content-Type": "application/json",
+  };
+}
+
+function validateUid(uid) {
+  const number = Number(uid);
+  if (!Number.isInteger(number) || number < 0) {
+    throw new Error("Agora UID must be a non-negative integer");
   }
+  return number;
+}
 
-  getAuthHeader() {
-    const credentials = Buffer.from(
-      `${config.agora.customerId}:${config.agora.customerSecret}`
-    ).toString("base64");
+export function generateRtcToken(channelName, uid, role = RtcRole.PUBLISHER) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  const certificate = required("AGORA_APP_CERTIFICATE", APP_CERTIFICATE);
+  const channel = String(channelName || "");
+  if (!channel) throw new Error("channelName is required");
 
-    return `Basic ${credentials}`;
-  }
+  return RtcTokenBuilder.buildTokenWithUid(
+    appId,
+    certificate,
+    channel,
+    validateUid(uid),
+    role,
+    TOKEN_TTL,
+    TOKEN_TTL
+  );
+}
 
-  async generateRtcToken({ channelName, uid = 0 }) {
-    if (!config.agora.appId || !config.agora.appCertificate) {
-      throw new Error("Agora App ID / App Certificate not configured");
-    }
+/**
+ * generateRtmToken
+ * RTM (Signaling) requires its own token, separate from the RTC token,
+ * even though it uses the same App ID/Certificate. Needed for the
+ * Conversational AI toolkit's live-transcript delivery over Signaling.
+ * RTM uses a string user ID, not a numeric UID like RTC.
+ */
+export function generateRtmToken(userId) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  const certificate = required("AGORA_APP_CERTIFICATE", APP_CERTIFICATE);
+  const account = String(userId || "");
+  if (!account) throw new Error("userId is required for an RTM token");
 
-    const expireTs =
-      Math.floor(Date.now() / 1000) + TOKEN_TTL_SECONDS;
+  // agora-token@2.x's RtmTokenBuilder.buildToken takes 4 args, no role —
+  // confirmed by inspecting the installed package directly, not assumed.
+  return RtmTokenBuilder.buildToken(appId, certificate, account, TOKEN_TTL);
+}
 
-    const token = RtcTokenBuilder.buildTokenWithUid(
-      config.agora.appId,
-      config.agora.appCertificate,
-      channelName,
-      uid,
-      RtcRole.PUBLISHER,
-      expireTs,
-      expireTs
-    );
+export function createCandidateRtcCredentials(channelName, uid) {
+  const candidateUid = validateUid(uid);
+  return {
+    appId: required("AGORA_APP_ID", APP_ID),
+    channel: String(channelName),
+    token: generateRtcToken(channelName, candidateUid),
+    uid: candidateUid,
+    expiresIn: TOKEN_TTL,
+    // Candidate's RTM login uses their numeric UID stringified as the
+    // RTM user account — must match what the frontend logs into RTM with.
+    rtmUid: String(candidateUid),
+    rtmToken: generateRtmToken(String(candidateUid)),
+  };
+}
 
-    return {
-      appId: config.agora.appId,
-      channelName,
-      uid,
-      token,
-      expiresIn: TOKEN_TTL_SECONDS,
-    };
-  }
+export async function startAgoraAgent({
+  channelName,
+  candidateUid,
+  agentUid = AGENT_UID,
+  name,
+} = {}) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  const channel = String(channelName || `interview_${Date.now()}`);
+  const numericAgentUid = validateUid(agentUid);
+  const agentToken = generateRtcToken(channel, numericAgentUid);
 
-  /**
-   * Start the published Conversational AI agent
-   * in the same RTC channel as the candidate.
-   */
-  async startAgent({ channelName, agentRtcUid = 9999 }) {
-    if (!this.isConfigured()) {
-      throw new Error(
-        "Agora Conversational AI credentials are not fully configured"
-      );
-    }
+  const payload = {
+    name: String(name || `interview_agent_${Date.now()}`),
 
-    const agentToken = await this.generateRtcToken({
-      channelName,
-      uid: agentRtcUid,
-    });
+    // Required so the agent delivers live transcripts over Signaling —
+    // without this, no transcript events are ever sent, no matter what
+    // the frontend subscribes to.
+    advanced_features: {
+      enable_rtm: true,
+    },
 
-    const url =
-      `https://api.agora.io/api/conversational-ai-agent/v2` +
-      `/projects/${config.agora.appId}/join`;
+    properties: {
+      channel,
+      token: agentToken,
+      agent_rtc_uid: String(numericAgentUid),
+      remote_rtc_uids:
+        candidateUid === undefined || candidateUid === null
+          ? ["*"]
+          : [String(validateUid(candidateUid))],
+      enable_string_uid: false,
+      idle_timeout: 180,
 
-    const response = await fetch(url, {
-      method: "POST",
+      // Routes transcript data over the Signaling (RTM) channel instead
+      // of (or in addition to) raw RTC data-stream packets.
+      data_channel: "rtm",
 
-      headers: {
-        Authorization: this.getAuthHeader(),
-        "Content-Type": "application/json",
-      },
-
-      body: JSON.stringify({
-        name: config.agora.agentName,
-
-        pipeline_id: config.agora.pipelineId,
-
-        properties: {
-          channel: channelName,
-
-          agent_rtc_uid: String(agentRtcUid),
-
-          remote_rtc_uids: ["*"],
-
-          token: agentToken.token,
+      asr: {
+        credential_mode: "managed",
+        vendor: "deepgram",
+        params: {
+          url: "wss://api.deepgram.com/v1/listen",
+          model: "nova-3",
+          language: "en-US",
         },
-      }),
-    });
+      },
+      llm: {
+        credential_mode: "managed",
+        vendor: "openai",
+        style: "openai",
+        url: "https://api.openai.com/v1/chat/completions",
+        system_messages: [
+          {
+            role: "system",
+            content: [
+              "You are a professional five-person AI interview panel.",
+              "Personas: TL Technical Lead, HM Hiring Manager, PL Product Lead, BL Behavioural Lead, CA Customer Advocate.",
+              "Only one persona speaks at a time.",
 
-    const data = await response.json();
+              
+              "Ask one concise question at a time and wait for the candidate's answer.",
+              "Listen to the candidate's answers, validate their response briefly, and ask an adaptive follow-up or hand off the inquiry to evaluate system design, problem-solving, or communication",
+              "Start with TL, then hand off naturally to the most relevant persona.",
+              "Do not monologue or provide long lists over voice",
+            ].join(" "),
+          },
+        ],
+        greeting_message:
+          " Hello! I'm Maya from the AI interview panel. We're excited to speak with you today. To kick things off, could you briefly introduce yourself and highlight a recent project you built?",
+        failure_message:
+          " Sorry, I did not understand that. Could you please repeat your answer?",
+        max_history: 20,
+        params: { model: "gpt-4o-mini" },
+      },
+      tts: {
+        credential_mode: "managed",
+        vendor: "minimax",
+        params: {
+          url: "wss://api.minimax.io/ws/v1/t2a_v2",
+          model: "speech-2.6-turbo",
+          voice_setting: { voice_id: "English_captivating_female1" },
+        },
+      },
+    },
+  };
 
-    if (!response.ok) {
-      logger.error("Agora agent start failed:", data);
-
-      throw new Error(
-        data?.reason ||
-          data?.detail ||
-          "Failed to start Agora conversational agent"
-      );
-    }
-
-    logger.info(
-      `Agora agent started: ${data.agent_id} on channel ${channelName}`
+  try {
+    const response = await axios.post(
+      `${API_BASE}/projects/${encodeURIComponent(appId)}/join`,
+      payload,
+      { headers: headers(), timeout: 15000 }
     );
-
-    return {
-      agentId: data.agent_id,
-      channelName,
-      agentRtcUid,
-    };
-  }
-
-  /**
-   * Make the Agora agent speak our already-generated
-   * interviewer response through its configured TTS.
-   */
-  async speak({ agentId, text }) {
-    if (!agentId) {
-      throw new Error("Agora agentId is required");
-    }
-
-    if (!text?.trim()) {
-      return;
-    }
-
-    const url =
-      `https://api.agora.io/api/conversational-ai-agent/v2` +
-      `/projects/${config.agora.appId}` +
-      `/agents/${agentId}/speak`;
-
-    const response = await fetch(url, {
-      method: "POST",
-
-      headers: {
-        Authorization: this.getAuthHeader(),
-        "Content-Type": "application/json",
-      },
-
-      body: JSON.stringify({
-        text: text.trim(),
-        priority: "INTERRUPT",
-        interruptable: true,
-      }),
-    });
-
-    const data = await response.json().catch(() => ({}));
-
-    if (!response.ok) {
-      logger.error("Agora TTS failed:", data);
-
-      throw new Error(
-        data?.reason ||
-          data?.detail ||
-          "Agora TTS broadcast failed"
-      );
-    }
-
-    logger.info(`Agora TTS speaking: ${text.slice(0, 80)}...`);
-
-    return data;
-  }
-
-  /**
-   * Stop the Agora conversational AI agent.
-   */
-  async stopAgent(agentId) {
-    if (!agentId) return;
-
-    const url =
-      `https://api.agora.io/api/conversational-ai-agent/v2` +
-      `/projects/${config.agora.appId}` +
-      `/agents/${agentId}/leave`;
-
-    const response = await fetch(url, {
-      method: "POST",
-
-      headers: {
-        Authorization: this.getAuthHeader(),
-        "Content-Type": "application/json",
-      },
-
-      body: JSON.stringify({}),
-    });
-
-    if (!response.ok) {
-      const data = await response.json().catch(() => ({}));
-
-      logger.error("Failed to stop Agora agent:", data);
-
-      throw new Error(
-        data?.reason ||
-          data?.detail ||
-          "Failed to stop Agora agent"
-      );
-    }
-
-    logger.info(`Agora agent stopped: ${agentId}`);
+    const agentId = response.data?.agent_id;
+    if (!agentId) throw new Error(`No agent_id returned: ${JSON.stringify(response.data)}`);
+    return { agentId, agentUid: numericAgentUid, channelName: channel, ...response.data };
+  } catch (error) {
+    const detail = error.response?.data || error.message;
+    throw new Error(`Agora agent start failed: ${JSON.stringify(detail)}`);
   }
 }
 
-export const agoraService = new AgoraService();
+export async function thinkAgent(agentId, text) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  if (!agentId || !text?.trim()) throw new Error("agentId and text are required");
+
+  const response = await axios.post(
+    `${API_BASE}/projects/${encodeURIComponent(appId)}/agents/${encodeURIComponent(agentId)}/think`,
+    {
+      text: String(text).slice(0, 512),
+      on_listening_action: "interrupt",
+      on_thinking_action: "interrupt",
+      on_speaking_action: "ignore",
+      interruptable: true,
+    },
+    { headers: headers(), timeout: 15000 }
+  );
+  return response.data;
+}
+
+export async function speakAgent(agentId, text) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  if (!agentId || !text?.trim()) throw new Error("agentId and text are required");
+
+  const response = await axios.post(
+    `${API_BASE}/projects/${encodeURIComponent(appId)}/agents/${encodeURIComponent(agentId)}/speak`,
+    {
+      text: String(text).slice(0, 512),
+      priority: "INTERRUPT",
+      interruptable: true,
+    },
+    { headers: headers(), timeout: 15000 }
+  );
+  return response.data;
+}
+
+export async function stopAgent(agentId) {
+  const appId = required("AGORA_APP_ID", APP_ID);
+  if (!agentId) throw new Error("agentId is required");
+
+  await axios.post(
+    `${API_BASE}/projects/${encodeURIComponent(appId)}/agents/${encodeURIComponent(agentId)}/leave`,
+    {},
+    { headers: headers(), timeout: 15000 }
+  );
+  return { status: "stopped", agentId };
+}
+
+export const agoraService = {
+  generateRtcToken,
+  generateRtmToken,
+  createCandidateRtcCredentials,
+  startAgoraAgent,
+  thinkAgent,
+  speakAgent,
+  stopAgent,
+};
+
+export default agoraService;

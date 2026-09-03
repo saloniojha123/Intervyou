@@ -1,214 +1,200 @@
-import { useEffect, useRef, useState } from "react";
+
+
+
+import { useCallback, useEffect, useRef, useState } from "react";
 import AgoraRTC from "agora-rtc-sdk-ng";
 
-export function useAgoraClient({
-  appId,
-  channelName,
-  token,
-  uid,
-}) {
-  const clientRef = useRef(null);
-  const localAudioTrackRef = useRef(null);
-  const cancelledRef = useRef(false);
-
+export function useAgoraClient() {
   const [joined, setJoined] = useState(false);
-  const [micActive, setMicActive] = useState(false);
-  const [error, setError] = useState(null);
+  const [isMuted, setIsMuted] = useState(false);
+  const [audioVolume, setAudioVolume] = useState(0);
+  const [remoteSpeaking, setRemoteSpeaking] = useState(false);
+  const [remoteUsers, setRemoteUsers] = useState([]);
+
+  const clientRef = useRef(null);
+  const micRef = useRef(null);
+  const joiningRef = useRef(null);
+  const mountedRef = useRef(false);
+
+  if (!clientRef.current) {
+    clientRef.current = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
+  }
 
   useEffect(() => {
-    cancelledRef.current = false;
+    mountedRef.current = true;
+    const client = clientRef.current;
 
-    if (!appId || !channelName) {
-      console.warn("Agora configuration missing", {
-        appId,
-        channelName,
-        uid,
-      });
-      return;
-    }
-
-    const client = AgoraRTC.createClient({
-      mode: "rtc",
-      codec: "vp8",
-    });
-
-    clientRef.current = client;
-
-    let mounted = true;
-
-    async function joinAgora() {
-      try {
-        console.log("Joining Agora channel:", channelName);
-
-        const joinedUid = await client.join(
-          appId,
-          channelName,
-          token || null,
-          uid ?? null
-        );
-
-        if (!mounted || cancelledRef.current) {
-          return;
-        }
-
-        console.log("Agora joined. UID:", joinedUid);
-
-        const microphoneTrack =
-          await AgoraRTC.createMicrophoneAudioTrack();
-
-        if (!mounted || cancelledRef.current) {
-          microphoneTrack.close();
-          return;
-        }
-
-        localAudioTrackRef.current = microphoneTrack;
-
-        await client.publish([microphoneTrack]);
-
-        if (!mounted || cancelledRef.current) {
-          return;
-        }
-
-        setJoined(true);
-        setMicActive(true);
-        setError(null);
-
-        console.log("Agora microphone published successfully");
-
-        // Listen for AI/remote audio
-        client.on(
-          "user-published",
-          async (user, mediaType) => {
-            try {
-              await client.subscribe(user, mediaType);
-
-              if (mediaType === "audio") {
-                user.audioTrack?.play();
-
-                console.log(
-                  "Remote AI audio received from:",
-                  user.uid
-                );
-              }
-            } catch (err) {
-              console.error(
-                "Failed to subscribe to remote audio:",
-                err
-              );
-            }
-          }
-        );
-
-        client.on("user-unpublished", (user, mediaType) => {
-          console.log(
-            "Remote user unpublished:",
-            user.uid,
-            mediaType
-          );
-        });
-      } catch (err) {
-        /*
-         * Agora can throw OPERATION_ABORTED when an async
-         * join/publish operation is cancelled during cleanup.
-         *
-         * Do not show this as a real microphone error if the
-         * component was already unmounted.
-         */
-        if (
-          !mounted ||
-          cancelledRef.current ||
-          err?.code === "OPERATION_ABORTED" ||
-          err?.message?.includes("cancel token canceled")
-        ) {
-          console.log(
-            "Agora operation cancelled during cleanup."
-          );
-          return;
-        }
-
-        console.error("Agora connection failed:", err);
-
-        setError(err);
-        setJoined(false);
-        setMicActive(false);
+    const onVolume = (volumes = []) => {
+      const local = volumes.find((item) => item.uid === client.uid);
+      const remote = volumes.find(
+        (item) => item.uid !== client.uid && (item.level || 0) > 5
+      );
+      if (mountedRef.current) {
+        setAudioVolume(local?.level || 0);
+        setRemoteSpeaking(Boolean(remote));
       }
-    }
+    };
 
-    joinAgora();
+    const onPublished = async (user, mediaType) => {
+      try {
+        await client.subscribe(user, mediaType);
+        if (mediaType === "audio" && user.audioTrack) {
+          user.audioTrack.play();
+          console.log("[AgoraRTC] Playing remote audio from UID:", user.uid);
+        }
+        if (mountedRef.current) {
+          setRemoteUsers((old) => [
+            ...old.filter((item) => item.uid !== user.uid),
+            user,
+          ]);
+        }
+      } catch (error) {
+        console.error("[AgoraRTC] Subscribe failed:", error);
+      }
+    };
+
+    const onUnpublished = (user) => {
+      if (mountedRef.current) {
+        setRemoteUsers((old) => old.filter((item) => item.uid !== user.uid));
+      }
+    };
+
+    const onLeft = (user) => {
+      if (mountedRef.current) {
+        setRemoteUsers((old) => old.filter((item) => item.uid !== user.uid));
+      }
+    };
+
+    const onJoined = (user) => {
+      console.log("[AgoraRTC] Remote user joined:", user.uid);
+    };
+
+    const onConnection = (current, previous, reason) => {
+      console.log("[AgoraRTC] Connection state:", {
+        current,
+        previous,
+        reason,
+      });
+    };
+
+    client.enableAudioVolumeIndicator();
+    client.on("volume-indicator", onVolume);
+    client.on("user-published", onPublished);
+    client.on("user-unpublished", onUnpublished);
+    client.on("user-left", onLeft);
+    client.on("user-joined", onJoined);
+    client.on("connection-state-change", onConnection);
 
     return () => {
-      mounted = false;
-      cancelledRef.current = true;
-
-      console.log("Cleaning up Agora connection...");
-
-      const track = localAudioTrackRef.current;
-
-      if (track) {
-        try {
-          track.stop();
-          track.close();
-        } catch (err) {
-          console.warn("Error closing microphone:", err);
-        }
-
-        localAudioTrackRef.current = null;
-      }
-
-      if (clientRef.current) {
-        try {
-          clientRef.current.removeAllListeners();
-        } catch (err) {
-          console.warn("Error removing Agora listeners:", err);
-        }
-
-        try {
-          clientRef.current.leave();
-        } catch (err) {
-          console.warn("Error leaving Agora:", err);
-        }
-
-        clientRef.current = null;
-      }
-
-      setJoined(false);
-      setMicActive(false);
+      mountedRef.current = false;
+      client.off("volume-indicator", onVolume);
+      client.off("user-published", onPublished);
+      client.off("user-unpublished", onUnpublished);
+      client.off("user-left", onLeft);
+      client.off("user-joined", onJoined);
+      client.off("connection-state-change", onConnection);
     };
-  }, [appId, channelName, token, uid]);
+  }, []);
 
-  /*
-   * Mute / unmute candidate microphone
-   */
-  async function toggleMic() {
-    const track = localAudioTrackRef.current;
+  const joinSession = useCallback(async (params) => {
+    const client = clientRef.current;
+    const { appId, channel, token, uid } = params || {};
 
-    if (!track) {
-      console.warn("Microphone track is not available");
-      return;
+    if (!appId || !channel || !token || uid === undefined || uid === null) {
+      throw new Error("appId, channel, token, and uid are required");
     }
 
-    try {
-      const newState = !micActive;
-
-      await track.setEnabled(newState);
-
-      setMicActive(newState);
-
-      console.log(
-        newState
-          ? "Microphone unmuted"
-          : "Microphone muted"
-      );
-    } catch (err) {
-      console.error("Failed to toggle microphone:", err);
-      setError(err);
+    if (client.connectionState === "CONNECTED") {
+      return { uid: client.uid, alreadyJoined: true };
     }
-  }
+
+    if (joiningRef.current) return joiningRef.current;
+
+    joiningRef.current = (async () => {
+      try {
+        if (client.connectionState !== "DISCONNECTED") {
+          await client.leave().catch(() => {});
+        }
+
+        const assignedUid = await client.join(
+          String(appId),
+          String(channel),
+          String(token),
+          Number(uid)
+        );
+
+        const mic = await AgoraRTC.createMicrophoneAudioTrack({
+          AEC: true,
+          ANS: true,
+        });
+
+        micRef.current = mic;
+        await client.publish([mic]);
+
+        if (mountedRef.current) {
+          setJoined(true);
+          setIsMuted(false);
+        }
+
+        console.log("[AgoraRTC] Joined and published microphone:", {
+          assignedUid,
+          remoteUsers: client.remoteUsers.map((user) => user.uid),
+        });
+
+        return { uid: assignedUid };
+      } catch (error) {
+        console.error("[AgoraRTC] Join/publish failed:", error);
+        throw error;
+      } finally {
+        joiningRef.current = null;
+      }
+    })();
+
+    return joiningRef.current;
+  }, []);
+
+  const toggleMic = useCallback(async () => {
+    if (!micRef.current) return;
+    const nextMuted = !isMuted;
+    await micRef.current.setMuted(nextMuted);
+    setIsMuted(nextMuted);
+  }, [isMuted]);
+
+  const leaveSession = useCallback(async () => {
+    const mic = micRef.current;
+    micRef.current = null;
+    if (mic) {
+      mic.stop();
+      mic.close();
+    }
+
+    const client = clientRef.current;
+    if (client.connectionState !== "DISCONNECTED") {
+      await client.leave().catch((error) => {
+        console.warn("[AgoraRTC] Leave warning:", error);
+      });
+    }
+
+    joiningRef.current = null;
+    if (mountedRef.current) {
+      setJoined(false);
+      setRemoteUsers([]);
+      setRemoteSpeaking(false);
+      setAudioVolume(0);
+      setIsMuted(false);
+    }
+  }, []);
 
   return {
     joined,
-    micActive,
-    error,
+    isMuted,
+    audioVolume,
+    remoteSpeaking,
+    remoteUsers,
+    joinSession,
     toggleMic,
+    leaveSession,
   };
 }
+
+export default useAgoraClient;

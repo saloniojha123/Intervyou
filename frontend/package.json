@@ -9,7 +9,10 @@
     "preview": "vite preview"
   },
   "dependencies": {
-    "agora-rtc-sdk-ng": "^4.20.2",
+    "agora-agent-client-toolkit": "^2.9.1",
+    "agora-rtc-sdk-ng": "^4.24.8",
+    "agora-rtm": "^2.3.0",
+    "agora-rtm-sdk": "^2.3.0",
     "lucide-react": "^0.436.0",
     "react": "^18.3.1",
     "react-dom": "^18.3.1",

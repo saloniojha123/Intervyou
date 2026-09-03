@@ -1,10 +1,35 @@
-import { Router } from "express";
-import { startInterview, submitTurn, endInterview } from "../controllers/interview.controller.js";
 
-const router = Router();
 
-router.post("/start", startInterview);
-router.post("/:sessionId/turn", submitTurn);
-router.post("/:sessionId/end", endInterview);
+import express from "express";
+import multer from "multer";
+import path from "node:path";
+import fs from "node:fs";
+import {
+  startInterview,
+  getInterviewHistory,
+  speakInterviewAgent,
+  endInterview,
+} from "../controllers/interview.controller.js";
+
+const router = express.Router();
+const uploadDirectory = path.resolve("uploads/resumes");
+fs.mkdirSync(uploadDirectory, { recursive: true });
+
+const upload = multer({
+  dest: uploadDirectory,
+  limits: { fileSize: 5 * 1024 * 1024 },
+  fileFilter: (_req, file, callback) => {
+    const extension = path.extname(file.originalname || "").toLowerCase();
+    if (![".pdf", ".docx", ".txt"].includes(extension)) {
+      return callback(new Error("Only PDF, DOCX, and TXT resumes are supported"));
+    }
+    callback(null, true);
+  },
+});
+
+router.get("/history", getInterviewHistory);
+router.post("/start", upload.single("resume"), startInterview);
+router.post("/speak", speakInterviewAgent);
+router.post("/end", endInterview);
 
 export default router;

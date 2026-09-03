@@ -1,32 +1,43 @@
+
+
+
 import mongoose from "mongoose";
 
 const turnSchema = new mongoose.Schema(
   {
-    speaker: String,
-    personaId: String,
-    text: String,
-    timestamp: Date,
+    speaker: { type: String, trim: true },
+    personaId: { type: String, trim: true },
+    text: { type: String, required: true, trim: true },
+    timestamp: { type: Date, default: Date.now },
   },
   { _id: false }
 );
 
 const flagSchema = new mongoose.Schema(
   {
-    type: String, // 'vague' | 'contradiction'
-    note: String,
-    timestamp: Date,
+    type: { type: String, enum: ["vague", "contradiction"] },
+    note: { type: String, trim: true },
+    timestamp: { type: Date, default: Date.now },
   },
   { _id: false }
 );
 
 const interviewSchema = new mongoose.Schema(
   {
-    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
-    sessionId: { type: String, required: true, unique: true },
-    status: { type: String, enum: ["active", "completed"], default: "active" },
-    transcript: [turnSchema],
-    flags: [flagSchema],
-    finalDifficulty: String,
+    userId: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+    sessionId: { type: String, required: true, unique: true, index: true, trim: true },
+    status: { type: String, enum: ["active", "completed"], default: "active", index: true },
+    role: { type: String, trim: true },
+    level: { type: String, trim: true },
+    resumeText: { type: String, default: "" },
+    resumeOriginalName: { type: String, trim: true },
+    candidateUid: { type: Number },
+    agentId: { type: String, trim: true },
+    agentUid: { type: Number, default: 9999 },
+    channelName: { type: String, trim: true },
+    transcript: { type: [turnSchema], default: [] },
+    flags: { type: [flagSchema], default: [] },
+    finalDifficulty: { type: String, trim: true },
     report: mongoose.Schema.Types.Mixed,
   },
   { timestamps: true }

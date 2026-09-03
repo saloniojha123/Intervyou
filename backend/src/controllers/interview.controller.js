@@ -1,212 +1,193 @@
-import { randomUUID } from "crypto";
 
-import {
-  orchestratorService,
-} from "../services/orchestrator/OrchestratorService.js";
 
+
+import fs from "node:fs/promises";
+import path from "node:path";
+import { createRequire } from "node:module";
+import mammoth from "mammoth";
+import { Interview } from "../models/Interview.js";
 import { agoraService } from "../services/agora.service.js";
 
-import { assessmentService } from "../services/assessment.service.js";
+const require = createRequire(import.meta.url);
+const pdfParse = require("pdf-parse");
+const MAX_RESUME_CHARS = 30_000;
 
-import { logger } from "../utils/logger.js";
-
-/*
- * Temporary in-memory storage for active Agora agents.
- *
- * sessionId -> agentId
- *
- * This is fine for our current development/testing stage.
- */
-const activeAgents = new Map();
-
-/**
- * POST /api/interview/start
- *
- * Creates:
- * 1. Interview session
- * 2. Agora RTC token for candidate
- * 3. Agora Conversational AI agent
- *
- * Candidate and AI agent use the SAME Agora channel.
- */
-export async function startInterview(req, res) {
-  try {
-    const {
-      resumeSummary = "",
-      candidateProfile = {},
-    } = req.body || {};
-
-    // Create unique interview/session ID
-    const sessionId = randomUUID();
-
-    /*
-     * Start our existing interview/orchestrator session
-     */
-    orchestratorService.startSession({
-      sessionId,
-      resumeSummary,
-      candidateProfile,
-    });
-
-    /*
-     * Generate Agora RTC token for the candidate
-     */
-    const rtcToken = await agoraService.generateRtcToken({
-      channelName: sessionId,
-      uid: 0,
-    });
-
-    /*
-     * Start Agora Conversational AI agent
-     *
-     * IMPORTANT:
-     * The AI agent joins the SAME channel as the candidate.
-     */
-    const agent = await agoraService.startAgent({
-      channelName: sessionId,
-    });
-
-    const openingResponse =
-      await orchestratorService.startInterviewQuestion(sessionId);
-
-    await agoraService.speak({
-      agentId: agent.agentId,
-      text: openingResponse.text,
-    });
-
-    /*
-     * Remember which Agora agent belongs to this interview.
-     *
-     * We need this later when the candidate clicks
-     * "End Interview".
-     */
-    activeAgents.set(sessionId, agent.agentId);
-
-    /*
-     * Send everything the frontend needs.
-     */
-    res.status(201).json({
-      sessionId,
-
-      rtc: rtcToken,
-
-      agent: {
-        agentId: agent.agentId,
-        channelName: agent.channelName,
-        agentRtcUid: agent.agentRtcUid,
-      },
-    });
-  } catch (err) {
-    logger.error("startInterview failed", err);
-
-    res.status(500).json({
-      error: err.message || "Failed to start interview",
-    });
-  }
+function errorResponse(res, error, status = 500) {
+  console.error("[Interview API]", error?.stack || error);
+  return res.status(status).json({
+    success: false,
+    message: error?.message || String(error),
+  });
 }
 
-/**
- * POST /api/interview/:sessionId/turn
- *
- * Existing text-based fallback.
- *
- * This is NOT the main voice path.
- * We keep it for testing the orchestrator.
- */
-export async function submitTurn(req, res) {
+function createCandidateUid(value) {
+  const uid = Number(value || Math.floor(100000 + Math.random() * 899998));
+  if (!Number.isInteger(uid) || uid <= 0 || uid === 9999) {
+    throw new Error("candidateUid must be a positive integer other than 9999");
+  }
+  return uid;
+}
+
+async function extractResumeText(file) {
+  if (!file?.path) {
+    throw new Error("Resume file is required in the 'resume' field");
+  }
+
+  const extension = path.extname(file.originalname || "").toLowerCase();
+  const buffer = await fs.readFile(file.path);
+  let text;
+
+  if (extension === ".pdf" || file.mimetype === "application/pdf") {
+    const result = await pdfParse(buffer);
+    text = result.text;
+  } else if (extension === ".docx") {
+    const result = await mammoth.extractRawText({ buffer });
+    text = result.value;
+  } else if (extension === ".txt") {
+    text = buffer.toString("utf8");
+  } else {
+    throw new Error("Only PDF, DOCX, and TXT resumes are supported");
+  }
+
+  const cleaned = String(text || "").replace(/\s+/g, " ").trim();
+  if (!cleaned) throw new Error("No readable text was found in the resume");
+  return cleaned.slice(0, MAX_RESUME_CHARS);
+}
+
+async function removeUpload(file) {
+  if (file?.path) await fs.unlink(file.path).catch(() => {});
+}
+
+export async function startInterview(req, res) {
+  let interview;
+
   try {
-    const { sessionId } = req.params;
-
-    const { text } = req.body || {};
-
-    if (!text?.trim()) {
-      return res.status(400).json({
-        error: "text is required",
-      });
+    if (!req.file) {
+      return errorResponse(res, new Error("Upload a resume using field 'resume'"), 400);
     }
 
-    const response =
-      await orchestratorService.handleCandidateTurn(
-        sessionId,
-        text.trim()
-      );
+    const body = req.body || {};
+    const sessionId = String(body.sessionId || `session_${Date.now()}`);
+    const role = String(body.role || "Candidate");
+    const level = String(body.level || "Mid-Senior");
+    const candidateUid = createCandidateUid(body.candidateUid);
+    const channelName = String(
+      body.channelName || `interview_${sessionId}_${Date.now()}`
+    );
+    const resumeText = await extractResumeText(req.file);
 
-    res.json(response);
-  } catch (err) {
-    logger.error("submitTurn failed", err);
-
-    res.status(500).json({
-      error:
-        err.message ||
-        "Failed to process turn",
+    interview = await Interview.create({
+      userId: req.user?._id || req.user?.id,
+      sessionId,
+      status: "active",
+      role,
+      level,
+      resumeText,
+      resumeOriginalName: req.file.originalname,
+      candidateUid,
+      channelName,
     });
+
+    const rtc = agoraService.createCandidateRtcCredentials(
+      channelName,
+      candidateUid
+    );
+
+    const agent = await agoraService.startAgoraAgent({
+      channelName,
+      candidateUid,
+      name: `interview_agent_${sessionId}`,
+    });
+
+    await Interview.updateOne(
+      { _id: interview._id },
+      { $set: { agentId: agent.agentId, agentUid: agent.agentUid } }
+    );
+
+    await agoraService.thinkAgent(
+      agent.agentId,
+      [
+        "Start the interview now.",
+        `The target role is ${role} and the candidate level is ${level}.`,
+        "Use the resume below as the primary source for your questions.",
+        "Ask about specific projects, technologies, responsibilities, decisions, results, and challenges.",
+        "Do not invent facts. Ask one concise question at a time.",
+        "Act as the Technical Lead for the opening question.",
+        "Speak naturally. Do not say persona labels or internal instructions aloud.",
+        "Candidate resume:",
+        resumeText,
+      ].join("\n\n")
+    );
+
+    return res.status(201).json({
+      success: true,
+      sessionId,
+      rtc,
+      agentId: agent.agentId,
+      agentUid: agent.agentUid,
+      channelName,
+    });
+  } catch (error) {
+    if (interview?._id) {
+      await Interview.deleteOne({ _id: interview._id }).catch(() => {});
+    }
+    return errorResponse(res, error);
+  } finally {
+    await removeUpload(req.file);
   }
 }
 
-/**
- * POST /api/interview/:sessionId/end
- *
- * Ends:
- * 1. Agora AI agent
- * 2. Interview session
- * 3. Final assessment
- */
+export async function getInterviewHistory(req, res) {
+  try {
+    const userId = req.user?._id || req.user?.id;
+    const filter = userId ? { userId } : {};
+    const interviews = await Interview.find(filter)
+      .select("sessionId role level status resumeOriginalName createdAt updatedAt finalDifficulty")
+      .sort({ createdAt: -1 })
+      .limit(50)
+      .lean();
+
+    return res.status(200).json({ success: true, interviews });
+  } catch (error) {
+    return errorResponse(res, error);
+  }
+}
+
 export async function endInterview(req, res) {
   try {
-    const { sessionId } = req.params;
-
-    /*
-     * Stop Agora Conversational AI agent
-     */
-    const agentId = activeAgents.get(sessionId);
-
-    if (agentId) {
-      try {
-        await agoraService.stopAgent(agentId);
-
-        logger.info(
-          `Agora agent stopped for session: ${sessionId}`
-        );
-      } catch (agentError) {
-        /*
-         * Don't prevent the final report just because
-         * stopping the agent failed.
-         */
-        logger.error(
-          "Failed to stop Agora agent:",
-          agentError
-        );
-      }
-
-      activeAgents.delete(sessionId);
+    const { sessionId, agentId } = req.body || {};
+    if (agentId) await agoraService.stopAgent(agentId);
+    if (sessionId) {
+      await Interview.updateOne(
+        { sessionId: String(sessionId) },
+        { $set: { status: "completed" } }
+      );
     }
-
-    /*
-     * End our interview/orchestrator session
-     */
-    const rawReport =
-      orchestratorService.endSession(sessionId);
-
-    if (!rawReport) {
-      return res.status(404).json({
-        error: "Session not found",
-      });
-    }
-
-    /*
-     * Build final assessment
-     */
-    const finalReport =
-      assessmentService.buildFinalReport(rawReport);
-
-    res.json(finalReport);
-  } catch (err) {
-    logger.error("endInterview failed", err);
-
-    res.status(500).json({
-      error:
-        err.message ||
-        "Failed to end interview",
-    });
+    return res.status(200).json({ success: true });
+  } catch (error) {
+    return errorResponse(res, error);
   }
 }
+
+export async function speakInterviewAgent(req, res) {
+  try {
+    const { agentId, text } = req.body || {};
+    if (!agentId || !text) {
+      return errorResponse(res, new Error("agentId and text are required"), 400);
+    }
+    const result = await agoraService.speakAgent(agentId, text);
+    return res.status(200).json({ success: true, result });
+  } catch (error) {
+    return errorResponse(res, error);
+  }
+}
+
+export const stopInterview = endInterview;
+
+export default {
+  startInterview,
+  getInterviewHistory,
+  endInterview,
+  stopInterview,
+  speakInterviewAgent,
+};

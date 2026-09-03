@@ -1,14 +1,11 @@
 import { Router } from "express";
+import { signup, login, me } from "../controllers/auth.controller.js";
+import { requireAuth } from "../middleware/auth.middleware.js";
 
 const router = Router();
 
-// TODO: implement real signup/login with bcrypt + JWT (see User model).
-router.post("/signup", (req, res) => {
-  res.status(501).json({ error: "Not implemented yet" });
-});
-
-router.post("/login", (req, res) => {
-  res.status(501).json({ error: "Not implemented yet" });
-});
+router.post("/signup", signup);
+router.post("/login", login);
+router.get("/me", requireAuth, me);
 
 export default router;
