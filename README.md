@@ -947,7 +947,7 @@ Intervyou follows basic application security practices including:
 
 ---
 
-## 🏆 Hackathon Differentiator
+##  Differentiator
 
 The key differentiator of Intervyou is not simply:
 
@@ -973,22 +973,6 @@ Intervyou brings this panel experience into a real-time AI voice environment.
 
 ---
 
-## 🚀 Future Roadmap
-
-- [ ] More interviewer personas
-- [ ] Advanced contradiction detection
-- [ ] Emotion/prosody analysis
-- [ ] Interview difficulty adaptation
-- [ ] Advanced resume parsing
-- [ ] Company-specific interview templates
-- [ ] Industry-specific interview panels
-- [ ] Candidate performance analytics
-- [ ] Interview benchmarking
-- [ ] Recruiter dashboard
-- [ ] Interview replay
-- [ ] Advanced AI evaluation
-- [ ] Production deployment
-- [ ] Scalable multi-session architecture
 
 ---
 
