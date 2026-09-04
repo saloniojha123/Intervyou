@@ -1,3 +1,7 @@
+import {
+  DEFAULT_PANEL_ID,
+  INTERVIEW_PANELS,
+} from "../config/interviewPanel.js";
 
 
 
@@ -75,18 +79,25 @@ export async function startInterview(req, res) {
       body.channelName || `interview_${sessionId}_${Date.now()}`
     );
     const resumeText = await extractResumeText(req.file);
-
+    
     interview = await Interview.create({
-      userId: req.user?._id || req.user?.id,
-      sessionId,
-      status: "active",
-      role,
-      level,
-      resumeText,
-      resumeOriginalName: req.file.originalname,
-      candidateUid,
-      channelName,
-    });
+  userId: req.user?._id || req.user?.id,
+  sessionId,
+  status: "active",
+  role,
+  level,
+  resumeText,
+  resumeOriginalName: req.file.originalname,
+  candidateUid,
+  channelName,
+
+  panel: {
+    activePersonaId: DEFAULT_PANEL_ID,
+    handoffCount: 0,
+    completedPersonaIds: [],
+  },
+});
+
 
     const rtc = agoraService.createCandidateRtcCredentials(
       channelName,
@@ -119,14 +130,21 @@ export async function startInterview(req, res) {
       ].join("\n\n")
     );
 
-    return res.status(201).json({
-      success: true,
-      sessionId,
-      rtc,
-      agentId: agent.agentId,
-      agentUid: agent.agentUid,
-      channelName,
-    });
+      return res.status(201).json({
+  success: true,
+  sessionId,
+  rtc,
+  agentId: agent.agentId,
+  agentUid: agent.agentUid,
+  channelName,
+
+  panel: {
+    activePersonaId: DEFAULT_PANEL_ID,
+    personas: INTERVIEW_PANELS,
+  },
+});
+
+  
   } catch (error) {
     if (interview?._id) {
       await Interview.deleteOne({ _id: interview._id }).catch(() => {});

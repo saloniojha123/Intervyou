@@ -1,6 +1,3 @@
-
-
-
 import React, { useEffect, useRef, useState } from "react";
 import { useLocation, useNavigate, useParams } from "react-router-dom";
 import {
@@ -18,37 +15,37 @@ import {
 import { useAgoraClient } from "../hooks/useAgoraClient.js";
 import { useAuth } from "../context/AuthContext.jsx";
 
-const PANEL_PERSONAS = [
+const DEFAULT_PANEL_PERSONAS = [
   {
-    id: "tech",
+    id: "technical",
     name: "Technical Lead",
     initials: "TL",
     role: "Architecture & Systems",
     color: "from-blue-600 to-indigo-700",
   },
   {
-    id: "hm",
+    id: "hiring_manager",
     name: "Hiring Manager",
     initials: "HM",
     role: "Leadership & Strategy",
     color: "from-emerald-600 to-teal-700",
   },
   {
-    id: "prod",
+    id: "product",
     name: "Product Lead",
     initials: "PL",
-    role: "Trade-offs & Roadmaps",
+    role: "Product Thinking & Roadmaps",
     color: "from-amber-600 to-orange-700",
   },
   {
-    id: "beh",
+    id: "behavioral",
     name: "Behavioural Lead",
     initials: "BL",
     role: "Culture & Team Fit",
     color: "from-purple-600 to-pink-700",
   },
   {
-    id: "cust",
+    id: "customer",
     name: "Customer Advocate",
     initials: "CA",
     role: "User Empathy & Impact",
@@ -56,11 +53,29 @@ const PANEL_PERSONAS = [
   },
 ];
 
+// Maps the [Persona: XX] tag the LLM prepends to each response (see
+// agora.service.js's system_messages) to this app's real persona ids.
+const PERSONA_TAG_TO_ID = {
+  TL: "technical",
+  HM: "hiring_manager",
+  PL: "product",
+  BL: "behavioral",
+  CA: "customer",
+};
+
+function detectPersonaIdFromText(text) {
+  const match = /\[Persona:\s*(TL|HM|PL|BL|CA)\]/i.exec(text || "");
+  if (!match) return null;
+  return PERSONA_TAG_TO_ID[match[1].toUpperCase()] || null;
+}
+
+
 export default function InterviewRoom() {
   const { sessionId } = useParams();
   const navigate = useNavigate();
   const location = useLocation();
   const auth = useAuth() || {};
+  const { authFetch } = auth;
   const user = auth.user || null;
 
   const {
@@ -68,24 +83,20 @@ export default function InterviewRoom() {
     audioVolume = 0,
     remoteSpeaking = false,
     remoteUsers = [],
+    transcript = [],
+    agentSpeaking = false,
     joinSession,
     toggleMic,
     leaveSession,
   } = useAgoraClient() || {};
 
-  const [activeSpeakerId, setActiveSpeakerId] = useState("tech");
+  const [activeSpeakerId, setActiveSpeakerId] = useState(
+  location.state?.panel?.activePersonaId || "technical"
+  );
   const [camOn, setCamOn] = useState(true);
   const [captionsOn, setCaptionsOn] = useState(true);
   const [seconds, setSeconds] = useState(0);
-  const [transcript] = useState([
-    {
-      id: 1,
-      speakerName: "Maya (Panel Lead)",
-      role: "Panel",
-      timestamp: "00:01",
-      text: "Hello! I am Maya from your interview panel. To start off, could you please introduce yourself and discuss a recent technical project you built?",
-    },
-  ]);
+
 
   const localVideoRef = useRef(null);
   const streamRef = useRef(null);
@@ -98,6 +109,8 @@ export default function InterviewRoom() {
   const rtcChannel = rtc?.channel || rtc?.channelName;
   const rtcToken = rtc?.token;
   const rtcUid = rtc?.uid;
+  const rtcRtmUid = rtc?.rtmUid;
+  const rtcRtmToken = rtc?.rtmToken;
 
   // Join Agora exactly once for this room.
   // Do not call leaveSession from this effect's cleanup. In React 18
@@ -145,6 +158,8 @@ export default function InterviewRoom() {
           channel: String(rtcChannel),
           token: String(rtcToken),
           uid: rtcUid,
+          rtmUid: rtcRtmUid,
+          rtmToken: rtcRtmToken,
         });
 
         if (active) {
@@ -164,7 +179,7 @@ export default function InterviewRoom() {
       active = false;
       // Intentionally no leaveSession() here; it can cancel an active join.
     };
-  }, [rtcAppId, rtcChannel, rtcToken, rtcUid, joinSession]);
+  }, [rtcAppId, rtcChannel, rtcToken, rtcUid, rtcRtmUid, rtcRtmToken, joinSession]);
 
   // Start the webcam without opening a second microphone stream.
   useEffect(() => {
@@ -215,34 +230,74 @@ export default function InterviewRoom() {
     transcriptBottomRef.current?.scrollIntoView({ behavior: "smooth" });
   }, [transcript]);
 
+  // Auto-switch the highlighted persona card based on the [Persona: XX]
+  // tag in the most recent transcript line, instead of relying only on
+  // manual clicks.
+  useEffect(() => {
+    if (!transcript.length) return;
+    const last = transcript[transcript.length - 1];
+    const detectedId = detectPersonaIdFromText(last?.text);
+    if (detectedId) {
+      setActiveSpeakerId(detectedId);
+    }
+  }, [transcript]);
+
   const formatTimer = (value) => {
     const mins = String(Math.floor(value / 60)).padStart(2, "0");
     const secs = String(value % 60).padStart(2, "0");
     return `${mins}:${secs}`;
   };
 
-  const handleEndInterview = async () => {
-    if (endingRef.current) return;
-    endingRef.current = true;
+   const handleEndInterview = async () => {
+  if (endingRef.current) return;
+  endingRef.current = true;
 
+  try {
+    console.log("[InterviewRoom] Ending interview");
+
+    if (typeof authFetch === "function") {
+      const response = await authFetch("/api/interview/end", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          sessionId,
+          agentId: location.state?.agentId,
+        }),
+      });
+
+      if (!response.ok) {
+        const data = await response.json().catch(() => ({}));
+        console.warn(
+          "[InterviewRoom] Backend end warning:",
+          data.message || data.error || response.status
+        );
+      }
+    }
+  } catch (error) {
+    // Do not block the candidate from leaving the Agora room.
+    console.warn("[InterviewRoom] Backend end warning:", error);
+  } finally {
     try {
-      console.log("[InterviewRoom] Ending interview");
       if (typeof leaveSession === "function") {
         await leaveSession();
       }
     } catch (error) {
-      console.error("[InterviewRoom] Agora leave error:", error);
-    } finally {
-      navigate(`/report/${sessionId}`, {
-        state: {
-          transcript,
-          role: location.state?.role,
-          level: location.state?.level,
-        },
-      });
+      console.warn("[InterviewRoom] Agora leave warning:", error);
     }
-  };
 
+    navigate(`/report/${sessionId}`, {
+      state: {
+        transcript,
+        role: location.state?.role,
+        level: location.state?.level,
+      },
+    });
+  }
+};
+
+    
   const toggleCam = () => {
     const track = streamRef.current?.getVideoTracks?.()[0];
     if (!track) return;
@@ -251,9 +306,26 @@ export default function InterviewRoom() {
     setCamOn(track.enabled);
   };
 
-  const activeSpeaker =
-    PANEL_PERSONAS.find((persona) => persona.id === activeSpeakerId) ||
-    PANEL_PERSONAS[0];
+  const panelPersonas = Array.isArray(location.state?.panel?.personas)
+  ? location.state.panel.personas.map((persona) => ({
+      id: persona.id,
+      name: persona.name,
+      initials: persona.shortName || persona.name
+        .split(" ")
+        .map((part) => part[0])
+        .join("")
+        .slice(0, 2),
+      role: persona.role,
+      color:
+        DEFAULT_PANEL_PERSONAS.find((item) => item.id === persona.id)?.color ||
+        "from-slate-600 to-slate-800",
+    }))
+  : DEFAULT_PANEL_PERSONAS;
+
+const activeSpeaker =
+  panelPersonas.find((persona) => persona.id === activeSpeakerId) ||
+  panelPersonas[0];
+
   const hasRemoteUsers = Array.isArray(remoteUsers) && remoteUsers.length > 0;
   const safeTranscript = Array.isArray(transcript) ? transcript : [];
   const latestMessage =
@@ -289,12 +361,12 @@ export default function InterviewRoom() {
         <div className="flex flex-col justify-between rounded-3xl border border-slate-800 bg-slate-950/50 p-6 backdrop-blur-xl lg:col-span-8">
           <div className="my-auto grid grid-cols-1 gap-6 sm:grid-cols-2">
             <div className="relative flex aspect-[4/3] flex-col items-center justify-center overflow-hidden rounded-2xl border border-slate-800 bg-slate-900 shadow-xl">
-              <div className={`flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-tr ${activeSpeaker.color} text-3xl font-extrabold text-white shadow-2xl transition-all duration-300`}>
+              <div className={`flex h-28 w-28 items-center justify-center rounded-full bg-gradient-to-tr ${activeSpeaker.color} text-3xl font-extrabold text-white shadow-2xl transition-all duration-300 ${agentSpeaking ? "ring-4 ring-emerald-400/50" : ""}`}>
                 {activeSpeaker.initials}
               </div>
               <div className="absolute right-3 top-3 flex items-center gap-1.5 rounded-full border border-emerald-500/20 bg-emerald-500/10 px-2 py-0.5 text-[10px] font-semibold text-emerald-400">
-                <Volume2 size={12} className={remoteSpeaking ? "animate-pulse" : ""} />
-                {remoteSpeaking ? "Speaking" : hasRemoteUsers ? "Connected" : "Agent Ready"}
+                <Volume2 size={12} className={agentSpeaking || remoteSpeaking ? "animate-pulse" : ""} />
+                {agentSpeaking || remoteSpeaking ? "Speaking" : hasRemoteUsers ? "Connected" : "Agent Ready"}
               </div>
               <div className="absolute bottom-3 left-3 rounded-xl border border-slate-800 bg-slate-950/80 px-3 py-1 text-xs font-semibold text-slate-200">
                 {activeSpeaker.name} ({activeSpeaker.role})
@@ -408,7 +480,7 @@ export default function InterviewRoom() {
             </div>
 
             <div className="space-y-2">
-              {PANEL_PERSONAS.map((persona) => {
+              {panelPersonas.map((persona) => {
                 const isCurrent = activeSpeakerId === persona.id;
                 return (
                   <button
@@ -449,11 +521,20 @@ export default function InterviewRoom() {
             </div>
 
             <div className="flex-1 space-y-3 overflow-y-auto pr-1 text-xs">
+              {safeTranscript.length === 0 && (
+                <p className="py-8 text-center text-slate-500">
+                  The transcript will appear here as the interview progresses.
+                </p>
+              )}
               {safeTranscript.map((item) => (
                 <div key={item.id} className="space-y-1">
                   <div className="flex items-center justify-between text-[10px]">
-                    <span className="font-semibold text-blue-400">{item.speakerName}</span>
-                    <span className="font-mono text-slate-500">{item.timestamp}</span>
+                    <span className="font-semibold text-blue-400">{item.speaker}</span>
+                    {item.timestamp && (
+                      <span className="font-mono text-slate-500">
+                        {new Date(item.timestamp).toLocaleTimeString([], { minute: "2-digit", second: "2-digit" })}
+                      </span>
+                    )}
                   </div>
                   <div className="rounded-2xl border border-slate-800/80 bg-slate-900/80 p-3 leading-relaxed text-slate-200">
                     {item.text}

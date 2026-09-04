@@ -189,12 +189,15 @@ export default function InterviewSetup() {
 
       navigate(`/interview/${data.sessionId}`, {
         state: {
-          ...location.state,
-          sessionId: data.sessionId,
-          rtc: data.rtc,
-          agentId: data.agentId,
-          agentUid: data.agentUid,
-        },
+       ...location.state,
+       sessionId: data.sessionId,
+        rtc: data.rtc,
+       agentId: data.agentId,
+       agentUid: data.agentUid,
+       channelName: data.channelName,
+        panel: data.panel,
+       }
+,
       });
     } catch (startError) {
       console.error("[InterviewSetup] Start interview failed:", startError);

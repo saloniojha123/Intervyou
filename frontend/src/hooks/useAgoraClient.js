@@ -1,8 +1,9 @@
 
 
-
 import { useCallback, useEffect, useRef, useState } from "react";
 import AgoraRTC from "agora-rtc-sdk-ng";
+import AgoraRTM from "agora-rtm";
+import { AgoraVoiceAI, AgoraVoiceAIEvents, TranscriptHelperMode } from "agora-agent-client-toolkit";
 
 export function useAgoraClient() {
   const [joined, setJoined] = useState(false);
@@ -11,12 +12,21 @@ export function useAgoraClient() {
   const [remoteSpeaking, setRemoteSpeaking] = useState(false);
   const [remoteUsers, setRemoteUsers] = useState([]);
 
+  // Real transcript + agent activity state, delivered over Signaling (RTM)
+  // by Agora's managed Conversational AI agent.
+  const [transcript, setTranscript] = useState([]);
+  const [agentSpeaking, setAgentSpeaking] = useState(false);
+  const [agentThinking, setAgentThinking] = useState(false);
+
   const clientRef = useRef(null);
   const micRef = useRef(null);
   const joiningRef = useRef(null);
   const mountedRef = useRef(false);
+  const rtmClientRef = useRef(null);
+  const voiceAIRef = useRef(null);
 
   if (!clientRef.current) {
+    AgoraRTC.setParameter("ENABLE_AUDIO_PTS_METADATA", true);
     clientRef.current = AgoraRTC.createClient({ mode: "rtc", codec: "vp8" });
   }
 
@@ -98,7 +108,7 @@ export function useAgoraClient() {
 
   const joinSession = useCallback(async (params) => {
     const client = clientRef.current;
-    const { appId, channel, token, uid } = params || {};
+    const { appId, channel, token, uid, rtmUid, rtmToken } = params || {};
 
     if (!appId || !channel || !token || uid === undefined || uid === null) {
       throw new Error("appId, channel, token, and uid are required");
@@ -141,6 +151,53 @@ export function useAgoraClient() {
           remoteUsers: client.remoteUsers.map((user) => user.uid),
         });
 
+        // Log into RTM (Signaling) and subscribe for live transcripts.
+        // Voice already works without this — a transcript failure here
+        // must never take down the call.
+        if (rtmUid && rtmToken) {
+          try {
+            const rtm = new AgoraRTM.RTM(String(appId), String(rtmUid));
+            await rtm.login({ token: rtmToken });
+            rtmClientRef.current = rtm;
+
+            const voiceAI = await AgoraVoiceAI.init({
+              rtcEngine: client,
+              rtmEngine: rtm,
+              renderMode: TranscriptHelperMode.TEXT,
+              enableLog: true,
+            });
+            voiceAIRef.current = voiceAI;
+
+            voiceAI.on(AgoraVoiceAIEvents.TRANSCRIPT_UPDATED, (items) => {
+              if (!mountedRef.current) return;
+              setTranscript(
+                (items || []).map((item) => ({
+                  id: `${item.uid}-${item.turn_id}`,
+                  speaker: item.uid,
+                  text: item.text,
+                  status: item.status,
+                  timestamp: item._time,
+                }))
+              );
+            });
+
+            voiceAI.on(AgoraVoiceAIEvents.AGENT_SPEAKING_CHANGED, (agentUserId, speaking) => {
+              if (mountedRef.current) setAgentSpeaking(Boolean(speaking));
+            });
+
+            voiceAI.on(AgoraVoiceAIEvents.AGENT_THINKING_CHANGED, (agentUserId, thinking) => {
+              if (mountedRef.current) setAgentThinking(Boolean(thinking));
+            });
+
+            voiceAI.subscribeMessage(String(channel));
+            console.log("[AgoraVoiceAI] Subscribed for live transcripts");
+          } catch (rtmError) {
+            console.error("[AgoraVoiceAI] RTM/transcript setup failed:", rtmError);
+          }
+        } else {
+          console.warn("[AgoraVoiceAI] No rtmUid/rtmToken provided — transcripts disabled");
+        }
+
         return { uid: assignedUid };
       } catch (error) {
         console.error("[AgoraRTC] Join/publish failed:", error);
@@ -168,6 +225,21 @@ export function useAgoraClient() {
       mic.close();
     }
 
+    if (voiceAIRef.current) {
+      try {
+        voiceAIRef.current.unsubscribe();
+        voiceAIRef.current.destroy();
+      } catch {
+        /* ignore cleanup errors */
+      }
+      voiceAIRef.current = null;
+    }
+
+    if (rtmClientRef.current) {
+      await rtmClientRef.current.logout().catch(() => {});
+      rtmClientRef.current = null;
+    }
+
     const client = clientRef.current;
     if (client.connectionState !== "DISCONNECTED") {
       await client.leave().catch((error) => {
@@ -182,6 +254,9 @@ export function useAgoraClient() {
       setRemoteSpeaking(false);
       setAudioVolume(0);
       setIsMuted(false);
+      setTranscript([]);
+      setAgentSpeaking(false);
+      setAgentThinking(false);
     }
   }, []);
 
@@ -191,6 +266,9 @@ export function useAgoraClient() {
     audioVolume,
     remoteSpeaking,
     remoteUsers,
+    transcript,
+    agentSpeaking,
+    agentThinking,
     joinSession,
     toggleMic,
     leaveSession,

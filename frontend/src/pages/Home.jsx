@@ -1,12 +1,23 @@
 
-
-
 import React, { useState } from "react";
 import { useNavigate } from "react-router-dom";
-import { Play, ShieldCheck, Sparkles, UploadCloud, FileText, CheckCircle2 } from "lucide-react";
+import {
+  Play,
+  ShieldCheck,
+  Sparkles,
+  UploadCloud,
+  FileText,
+  CheckCircle2,
+} from "lucide-react";
+import { useAuth } from "../context/AuthContext.jsx";
 
-export default function Home() {
+
+
+
+  export default function Home() {
   const navigate = useNavigate();
+  const { authFetch, isAuthenticated } = useAuth();
+
   const [role, setRole] = useState("Full Stack Software Engineer");
   const [level, setLevel] = useState("Senior");
   const [file, setFile] = useState(null);
@@ -21,56 +32,81 @@ export default function Home() {
   }
 
   const handleStartInterview = async () => {
-    setError("");
+  setError("");
 
-    if (!file) {
-      setError("Please upload your resume (PDF, DOCX, or TXT) to continue.");
-      return;
-    }
+  if (!file) {
+    setError("Please upload your resume (PDF, DOCX, or TXT) to continue.");
+    return;
+  }
 
-    setLoading(true);
-    try {
-      // The backend's /api/interview/start route runs multer's
-      // upload.single("resume") before the controller, so this MUST be
-      // sent as multipart/form-data with a field literally named "resume" —
-      // plain JSON will always be rejected with a 400.
-      const formData = new FormData();
-      formData.append("resume", file);
-      formData.append("role", role);
-      formData.append("level", level);
+  if (!isAuthenticated) {
+    setError("Your login session has expired. Please log in again.");
+    return;
+  }
 
-      const res = await fetch("http://localhost:5000/api/interview/start", {
-        method: "POST",
-        // No Content-Type header here on purpose — the browser sets the
-        // correct multipart boundary automatically when body is FormData.
-        body: formData,
-      });
+  setLoading(true);
 
-      if (!res.ok) {
-        const data = await res.json().catch(() => ({}));
-        // The backend's errorResponse() returns { success:false, message },
-        // not { error } — read the right field or you'll only ever see the
-        // generic fallback text below, never the real reason.
-        throw new Error(data.message || data.error || `Backend error (${res.status})`);
+  try {
+    const formData = new FormData();
+
+    formData.append("resume", file);
+    formData.append("role", role);
+    formData.append("level", level);
+
+    const res = await authFetch("/api/interview/start", {
+      method: "POST",
+      body: formData,
+    });
+
+    const data = await res.json().catch(() => ({}));
+
+    if (!res.ok || !data.success) {
+      if (res.status === 401) {
+        throw new Error("Your login session has expired. Please log in again.");
       }
 
-      const data = await res.json();
-      console.log("[Home] Interview started successfully:", data);
-
-      navigate(`/interview/${data.sessionId}`, {
-        state: {
-          rtc: data.rtc,
-          role,
-          level,
-        },
-      });
-    } catch (err) {
-      console.error("[Home] Start interview error:", err);
-      setError(err.message || "Could not start interview. Ensure backend is running on port 5000.");
-    } finally {
-      setLoading(false);
+      throw new Error(
+        data.message ||
+          data.error ||
+          `Backend error (${res.status})`
+      );
     }
-  };
+
+    if (
+      !data.sessionId ||
+      !data.rtc?.appId ||
+      !data.rtc?.channel ||
+      !data.rtc?.token ||
+      data.rtc?.uid === undefined ||
+      data.rtc?.uid === null
+    ) {
+      throw new Error("Backend returned incomplete Agora session data.");
+    }
+
+    console.log("[Home] Interview started successfully:", data);
+
+    navigate(`/interview/${data.sessionId}`, {
+      state: {
+        rtc: data.rtc,
+        role,
+        level,
+        agentId: data.agentId,
+        agentUid: data.agentUid,
+        channelName: data.channelName,
+        panel: data.panel,
+      },
+    });
+  } catch (err) {
+    console.error("[Home] Start interview error:", err);
+    setError(
+      err.message ||
+        "Could not start interview. Ensure the backend is running."
+    );
+  } finally {
+    setLoading(false);
+  }
+};
+
 
   return (
     <div className="min-h-screen bg-[#0f172a] text-slate-100 flex flex-col justify-center items-center px-4">

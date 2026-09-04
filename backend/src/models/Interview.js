@@ -35,6 +35,24 @@ const interviewSchema = new mongoose.Schema(
     agentId: { type: String, trim: true },
     agentUid: { type: Number, default: 9999 },
     channelName: { type: String, trim: true },
+    panel: {
+  activePersonaId: {
+    type: String,
+    default: "technical",
+    trim: true,
+  },
+  handoffCount: {
+    type: Number,
+    default: 0,
+  },
+  lastHandoffAt: {
+    type: Date,
+  },
+  completedPersonaIds: {
+    type: [String],
+    default: [],
+  },
+},
     transcript: { type: [turnSchema], default: [] },
     flags: { type: [flagSchema], default: [] },
     finalDifficulty: { type: String, trim: true },
